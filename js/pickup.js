@@ -6,14 +6,21 @@
      - from Home: a bullet in the one Quick Notes note (`quick-notes.md`, pinned in the sidebar), newest first
        under a heading for its day. A Quick Notes that was trashed or renamed is made again on the next capture.
      - from Dispatch: a new note in `inbox/`.
+     - with payload.daily (a YYYY-MM-DD day), into that day's note, made from the daily template if needed:
+         - with payload.section and payload.lines (Docket's wrap-up): a `## <section>` section of bullets,
+           replaced by a later offer only while it still says what Notes wrote (daily.js writeSection);
+         - otherwise under the note's `## Notes` heading, as a bullet.
+       The taken item also keeps {section, heading, hash} of a section it wrote.
 
    Notes records each capture it handled in its own collection `taken` (notes.taken v1; items {id: '<app>:<offer
    id>', path}), never in the sender's. A capture is written once: a note deleted later does not come back.
 
    acceptedNotes, noteFile, quickEntry and addToQuick are pure (apps/notes/test/pickup.test.mjs); startPickup does the reading and writing. */
 import { freePath, newNoteText, slugify } from './model.js';
+import { addUnder, writeSection } from './daily.js';
+import { dailyPath, dailyText as starterDaily } from './templates.js';
 
-export const SENDERS = { home: 'Home', agents: 'Dispatch' };
+export const SENDERS = { home: 'Home', agents: 'Dispatch', prioritizer: 'Docket' };
 /* Who sends Notes captures: the manifests on this site add to this list (shared/handoffs.js, docs/handoffs.md). */
 export const INBOX = 'inbox';
 export const QUICK = 'quick-notes.md';
@@ -32,7 +39,14 @@ export function acceptedNotes(app, env, taken = new Set()) {
       const text = h.text.trim().slice(0, 20000);
       const first = text.split('\n')[0].trim();
       const title = (typeof h.payload.title === 'string' && h.payload.title.trim() ? h.payload.title.trim() : first).replace(/\s+/g, ' ').slice(0, 120) || 'Captured note';
-      return { key: `${app}:${h.id}`, app, from: SENDERS[app] || app, id: h.id, date: h.date, at: typeof h.createdAt === 'string' ? h.createdAt : '', title, text };
+      const o = { key: `${app}:${h.id}`, app, from: SENDERS[app] || app, id: h.id, date: h.date, at: typeof h.createdAt === 'string' ? h.createdAt : '', title, text };
+      if (isDay(h.payload.daily)) {
+        o.daily = h.payload.daily;
+        const section = typeof h.payload.section === 'string' ? h.payload.section.replace(/[#\n\r]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+        const lines = Array.isArray(h.payload.lines) ? h.payload.lines.filter(l => typeof l === 'string' && l.trim()).map(l => l.replace(/\s+/g, ' ').trim().slice(0, 1000)).slice(0, 20) : [];
+        if (section && lines.length) { o.section = section; o.lines = lines; }
+      }
+      return o;
     });
 }
 
@@ -78,8 +92,9 @@ export function addToQuick(content, entries) {
 /* Read the senders, write what is new, record it. notes: the data layer (createNotes), for the paths it knows.
    hold(path): true while the person has unsaved edits in that note, so Quick Notes waits (run again after a save).
    Returns the number of captures added. Safe to call often: one run at a time. */
-export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false } = {}) {
+export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false, dailyText = async (day) => starterDaily(day) } = {}) {
   let running = false, again = false;
+  const watching = new Set();
 
   async function taken() {
     const env = await ws.data.get('taken');
@@ -101,9 +116,11 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false 
         try { src = await ws.data.get('handoffs', { app }); } catch (e) { src = null; }
         todo.push(...acceptedNotes(app, src, done));
       }
-      const quick = hold(QUICK) ? [] : todo.filter(o => QUICK_FROM.has(o.app));
-      const files = todo.filter(o => !QUICK_FROM.has(o.app));
-      if (!quick.length && !files.length) return 0;
+      const byTime = (a, b) => (a.date + a.at + a.id < b.date + b.at + b.id ? -1 : 1);
+      const daily = todo.filter(o => o.daily && !hold(dailyPath(o.daily))).sort(byTime);
+      const quick = hold(QUICK) ? [] : todo.filter(o => !o.daily && QUICK_FROM.has(o.app));
+      const files = todo.filter(o => !o.daily && !QUICK_FROM.has(o.app));
+      if (!quick.length && !files.length && !daily.length) return 0;
       const paths = new Set(notes.files ? notes.files.keys() : []);
       const written = [];
       if (quick.length) {
@@ -130,6 +147,25 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false 
         paths.add(f.path);
         written.push({ id: o.key, path: f.path });
       }
+      // Into a day's note. last: what Notes last wrote for this note and section (this run's writes count).
+      const lastWrite = (path, section) => [...env.items, ...written].reverse().find(i => i.path === path && i.section === section && i.hash) || null;
+      for (const o of daily) {
+        const path = dailyPath(o.daily);
+        let rec = { id: o.key, path, daily: o.daily };
+        for (let tries = 0; ; tries++) {
+          const cur = await ws.files.read(path);
+          let content = cur ? cur.content : await dailyText(o.daily);
+          if (o.section) {
+            const r = writeSection(content, o.section, o.lines.map(l => `- ${l}`).join('\n'), lastWrite(path, o.section));
+            content = r.content;
+            rec = { ...rec, section: o.section, heading: r.heading, hash: r.hash };
+          } else content = addUnder(content, 'Notes', quickEntry(o));
+          try { await ws.files.write(path, content, cur ? { mtime: cur.mtime } : { create: true }); break; }
+          catch (e) { if (e.code !== 'conflict' || tries >= 2) throw e; }
+        }
+        paths.add(path);
+        written.push(rec);
+      }
       const before = env, after = structuredClone(env);
       after.items.push(...written);
       ws.data.stamp(before, after);
@@ -139,7 +175,7 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false 
         await ws.data.put('taken', ws.data.merge(after, e.current));
       }
       added = written.length;
-      if (added) onAdded(written, (quick[0] || files[0]).from);
+      if (added) onAdded(written, (quick[0] || files[0] || daily[0]).from);
     } catch (e) {
       // Waiting for the folder, or a write failed: try again on the next change.
     } finally {
@@ -149,6 +185,14 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false 
     return added;
   }
 
-  for (const app of Object.keys(SENDERS)) ws.data.subscribe('handoffs', run, { app });
-  return { run };
+  /* Watch every sender's offers, including senders the manifests added after the page loaded. */
+  function watch() {
+    for (const app of Object.keys(SENDERS)) {
+      if (watching.has(app)) continue;
+      watching.add(app);
+      ws.data.subscribe('handoffs', run, { app });
+    }
+  }
+  watch();
+  return { run, watch };
 }

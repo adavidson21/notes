@@ -33,12 +33,15 @@ function proseLines(text) {
   return out;
 }
 
+/* An item that is only a link to a Docket task is already Docket's: never offered back to it. */
+const DOCKET_ONLY = /^\[[^\]]*\]\(\s*ws:prioritizer\/[^)\s]*\s*\)$/;
+
 /** Open and done action items: [{line, text, done}]. */
 export function actionItems(text) {
   const out = [];
   for (const { line, text: l } of proseLines(text)) {
     const m = ITEM.exec(l);
-    if (m && m[2].trim()) out.push({ line, text: m[2].trim(), done: m[1] !== ' ' });
+    if (m && m[2].trim() && !DOCKET_ONLY.test(m[2].trim())) out.push({ line, text: m[2].trim(), done: m[1] !== ' ' });
   }
   return out;
 }

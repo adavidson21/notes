@@ -17,6 +17,7 @@ import { PRODUCTS, baselineFor, blocksToMark, changedLines, markReviewed, needsR
 import { actionItems, offerFor, readOffers, sentIds, wins, withOffer } from './offers.js';
 import { planImport, linkMaps, rewriteNote } from './vault.js';
 import { notesCards } from './summary-cards.js';
+import { docketPlan } from './daily.js';
 import { dataUrl, inlineImages, wikiHtml } from './export.js';
 import { render, headingId } from './markdown.js';
 import {
@@ -62,10 +63,17 @@ let sent = new Set();
 // Notes captured in Home (into Quick Notes) or the Dispatch hub (into inbox/), pickup.js. No second click.
 const pickup = startPickup(ws, notes, {
   hold: (path) => path === ui.path && ['dirty', 'saving', 'failed', 'conflict'].includes(ui.status.kind),
+  dailyText: (day) => dailyNoteText(day),
   async onAdded(w, from) {
-    if (w.some(x => x.path === QUICK)) { try { await notes.refresh(QUICK); onExternal({ path: QUICK, gone: false }); } catch { /* shows on the next load */ } }
+    // Notes it wrote into (Quick Notes, a day's note): read again, and show the change if one is open.
+    for (const path of new Set(w.filter(x => x.path === QUICK || x.daily).map(x => x.path))) {
+      try { await notes.refresh(path); onExternal({ path, gone: false }); } catch { /* shows on the next load */ }
+    }
     const quick = w.filter(x => x.path === QUICK).length;
-    ws.toast(quick === w.length ? `Added ${quick === 1 ? 'a note' : quick + ' notes'} from ${from} to Quick Notes`
+    const day = w.filter(x => x.daily);
+    const where = (x) => (x.daily === dayOf(new Date()) ? "today's note" : `the note for ${x.daily}`);
+    ws.toast(day.length === w.length ? (day[0].section ? `Added the ${day[0].section.toLowerCase()} from ${from} to ${where(day[0])}` : `Added ${day.length === 1 ? 'a note' : day.length + ' notes'} from ${from} to ${where(day[0])}`)
+      : quick === w.length ? `Added ${quick === 1 ? 'a note' : quick + ' notes'} from ${from} to Quick Notes`
       : w.length === 1 ? `Added a note from ${from}: ${w[0].path}` : `Added ${w.length} notes from ${from}`, { kind: 'success' });
   }
 });
@@ -422,13 +430,20 @@ async function addStarters() {
 }
 
 /* Today's note: daily/<date>.md, made from templates/daily.md (or the starter) the first time. */
+/* A day's new note: the daily template (or the starter), with {{docket}} from Docket's summary when it is here. */
+async function dailyNoteText(day) {
+  const tpl = notes.texts.get('templates/daily.md');
+  let plan = '';
+  try { plan = docketPlan(await ws.data.get('summary', { app: 'prioritizer' }), day); } catch { /* no Docket: plan by hand */ }
+  return dailyText(day, tpl && tpl.content, plan);
+}
+
 async function openToday() {
   const day = dayOf(new Date());
   const path = dailyPath(day);
   if (!notes.files.has(path)) {
     if (!(await leaveNote())) return;
-    const tpl = notes.texts.get('templates/daily.md');
-    try { await notes.create(path, dailyText(day, tpl && tpl.content)); }
+    try { await notes.create(path, await dailyNoteText(day)); }
     catch (e) { if (e.code !== 'conflict') { toastErr(e); return; } await notes.readNote(path).catch(() => null); }
   }
   await openNote(path, { focus: true });
@@ -935,7 +950,7 @@ ws.on('online', async (p) => {
   pickup.run();
 // Senders of captures come from the manifests (ws.apps.list), without holding up the page: SENDERS is updated in
 // place, then pickup runs again for any new sender.
-ws.apps.list().then(apps => { const before = Object.keys(SENDERS).length; useSenders(SENDERS, apps, 'notes'); if (Object.keys(SENDERS).length > before) pickup.run(); }).catch(() => {});
+ws.apps.list().then(apps => { const before = Object.keys(SENDERS).length; useSenders(SENDERS, apps, 'notes'); pickup.watch(); if (Object.keys(SENDERS).length > before) pickup.run(); }).catch(() => {});
   if (!ui.path) await openLast();
 });
 ws.on('visible', (p) => { if (!p.visible && ui.status.kind === 'dirty') saveNow(); });
