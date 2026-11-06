@@ -11,10 +11,11 @@ import { createNotes } from './data.js';
 import { QUICK, SENDERS, startPickup } from './pickup.js';
 import { useSenders } from '../shared/handoffs.js';
 import { createSummaryWriter } from '../shared/summary.js';
+import { RELATION_LABEL } from '../shared/people.js';
 import { PAIR_HELP, canPair, forgetPairing, isPaired, pairWith } from '../shared/pair.js';
 import { DAILY, PRODUCT_TPL, STARTERS, TEMPLATES, dailyPath, dailyText, dayOf, fill, missingStarters, templatesIn } from './templates.js';
 import { PRODUCTS, baselineFor, blocksToMark, changedLines, markReviewed, needsReview } from './products.js';
-import { actionItems, offerFor, readOffers, sentIds, wins, withOffer } from './offers.js';
+import { actionItems, forRapport, offerFor, rapportOffers, readOffers, sentIds, withOffer } from './offers.js';
 import { planImport, linkMaps, rewriteNote } from './vault.js';
 import { notesCards } from './summary-cards.js';
 import { docketPlan } from './daily.js';
@@ -61,6 +62,8 @@ const appNames = { prioritizer: 'Docket', agents: 'Dispatch', receipts: 'Rapport
 // Offers Notes has sent (offers.js). The receivers can read them inside Workshop, or when paired.
 const canSend = ws.embedded || ws.backend === 'agent';
 let sent = new Set();
+// Workshop's People directory, for @handles (offers.js whoOf, the preview's person chips). Where Notes can read it.
+let dir = null;
 // Other apps' records for the [[ picker (records.js).
 const recordEnvs = {};
 let records = [];
@@ -88,7 +91,7 @@ const toastErr = (e) => ws.toast(e && e.message ? e.message : 'Something went wr
 /* ---------- painting ---------- */
 
 function state() {
-  return { notes, ui, found, tree: tree([...notes.texts.keys()], [...ui.extraFolders]), where: whereSaved(), sent, canSend,
+  return { notes, ui, found, tree: tree([...notes.texts.keys()], [...ui.extraFolders]), where: whereSaved(), sent, canSend, dir,
     versions: ui.path ? notes.history(ui.path).length : 0 };
 }
 
@@ -129,6 +132,7 @@ function paintPreview(now = false) {
   const ix = notes.index;
   preview.innerHTML = render(text, {
     appName: (id) => appNames[id] || id,
+    person: (h) => { const it = dir && dir.items.find(x => !x.archived && x.handle === h); return it ? it.name : null; },
     resolveLink(href) {
       const loc = localHref(href);
       if (!loc) return null;
@@ -465,20 +469,22 @@ async function readSent() {
 async function send(kind, line) {
   if (!ui.path) return;
   const text = editor.value;
-  const it = (kind === 'task' ? actionItems(text).filter(x => !x.done) : wins(text)).find(x => x.line === line);
+  const it = (kind === 'task' ? actionItems(text).filter(x => !x.done) : forRapport(text)).find(x => x.line === line);
   if (!it) { ws.toast('That line changed. Try again.', { kind: 'warn' }); return; }
   const note = { path: ui.path, title: notes.index.notes.get(ui.path)?.title || stem(ui.path) };
-  const item = offerFor(kind, note, it.text, { day: dayOf(new Date()) });
+  const day = dayOf(new Date());
+  // A task: one accepted offer to Docket. For Rapport: one offer per report named, or one as yours.
+  const items = kind === 'task' ? [offerFor('task', note, it.text, { day, dir })] : rapportOffers(note, it, { day, dir }).map(o => o.offer);
   try {
     for (let tries = 0; ; tries++) {
       const before = readOffers(await ws.data.get('handoffs'));
       if (!before) { ws.toast('Notes saved these by a newer version. Update Workshop to send more.', { kind: 'warn' }); return; }
-      const after = withOffer(before, item);
+      const after = items.reduce((env, item) => withOffer(env, item), before);
       ws.data.stamp(before, after);
       try { await ws.data.put('handoffs', after); sent = sentIds(after); break; }
       catch (e) { if (e.code !== 'conflict' || tries >= 2) throw e; }
     }
-    ws.toast(kind === 'task' ? 'Sent to Docket as a task.' : 'Sent to Rapport. Accept it there.', { kind: 'success' });
+    ws.toast(kind === 'task' ? 'Sent to Docket as a task.' : `Sent to Rapport${items.length > 1 ? ` as ${items.length} receipts` : ''}. Accept ${items.length > 1 ? 'them' : 'it'} there.`, { kind: 'success' });
     paintChrome();
   } catch (e) { toastErr(e); }
 }
@@ -778,6 +784,18 @@ function insertAtCursor(text) {
 const pk = { open: false, start: 0, items: [], pick: 0 };
 function updatePicker() {
   const before = editor.value.slice(0, editor.selectionStart);
+  // @: people from Workshop's People directory, to name who a line is about (plan 2).
+  const at = dir && /(^|[\s(])@([a-z0-9._-]{0,40})$/i.exec(before);
+  if (at) {
+    pk.start = editor.selectionStart - at[2].length - 1;
+    pk.items = peopleFor(at[2].toLowerCase());
+    if (!pk.items.length) { closePicker(); return; }
+    pk.pick = Math.min(pk.pick, pk.items.length - 1);
+    pk.open = true;
+    picker.innerHTML = pickerHtml(pk.items, pk.pick);
+    picker.hidden = false;
+    return;
+  }
   const m = /\[\[([^\]\n[]{0,60})$/.exec(before);
   if (!m) { closePicker(); return; }
   const q = m[1].toLowerCase();
@@ -791,10 +809,17 @@ function updatePicker() {
   picker.hidden = false;
 }
 function closePicker() { pk.open = false; picker.hidden = true; }
+/* People whose handle starts with q or whose name has it: reports first, then by name. Not you. */
+const REL_ORDER = { report: 0, peer: 1, manager: 2, contact: 3 };
+function peopleFor(q) {
+  return dir.items.filter(it => !it.archived && it.kind === 'person' && it.relation !== 'self' && it.handle && (it.handle.startsWith(q) || it.name.toLowerCase().includes(q)))
+    .sort((a, b) => (REL_ORDER[a.relation] ?? 4) - (REL_ORDER[b.relation] ?? 4) || a.name.localeCompare(b.name)).slice(0, 8)
+    .map(p => ({ title: p.name, handle: p.handle, path: `@${p.handle} · ${RELATION_LABEL[p.relation] || 'Contact'}` }));
+}
 function choosePicker(k = pk.pick) {
   const n = pk.items[k];
   if (!n) { closePicker(); return; }
-  const md = n.href ? recordLink(n) : `[${n.title.replace(/[[\]]/g, '')}](${relativeLink(ui.path, n.path)})`;
+  const md = n.handle ? `@${n.handle} ` : n.href ? recordLink(n) : `[${n.title.replace(/[[\]]/g, '')}](${relativeLink(ui.path, n.path)})`;
   editor.setRangeText(md, pk.start, editor.selectionStart, 'end');
   closePicker();
   editor.dispatchEvent(new Event('input'));
@@ -980,6 +1005,11 @@ readSent().then(() => paintChrome());
 if (canSend) ws.data.subscribe('handoffs', () => readSent().then(() => paintChrome()));
 ws.apps.list().then(apps => { for (const a of apps) appNames[a.id] = a.name; paintPreview(true); }).catch(() => {});
 if (pendingSearch !== null) { showSearch(pendingSearch); pendingSearch = null; }
+if (canSend && ws.people) {
+  const gotDir = (d) => { dir = d; paintChrome(); paintPreview(true); };
+  ws.people.get().then(gotDir, () => {});
+  ws.people.subscribe(gotDir);
+}
 // Other apps' records for the [[ picker (records.js), where Notes can read their summaries.
 if (canSend) for (const s of SOURCES) {
   const read = () => ws.data.get('summary', { app: s.app }).then(e => { recordEnvs[s.app] = e; records = recordsFrom(recordEnvs); }, () => {});
