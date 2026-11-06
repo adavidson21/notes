@@ -18,6 +18,7 @@ import { actionItems, offerFor, readOffers, sentIds, wins, withOffer } from './o
 import { planImport, linkMaps, rewriteNote } from './vault.js';
 import { notesCards } from './summary-cards.js';
 import { docketPlan } from './daily.js';
+import { SOURCES, matchRecords, recordLink, recordsFrom } from './records.js';
 import { dataUrl, inlineImages, wikiHtml } from './export.js';
 import { render, headingId } from './markdown.js';
 import {
@@ -60,6 +61,9 @@ const appNames = { prioritizer: 'Docket', agents: 'Dispatch', receipts: 'Rapport
 // Offers Notes has sent (offers.js). The receivers can read them inside Workshop, or when paired.
 const canSend = ws.embedded || ws.backend === 'agent';
 let sent = new Set();
+// Other apps' records for the [[ picker (records.js).
+const recordEnvs = {};
+let records = [];
 // Notes captured in Home (into Quick Notes) or the Dispatch hub (into inbox/), pickup.js. No second click.
 const pickup = startPickup(ws, notes, {
   hold: (path) => path === ui.path && ['dirty', 'saving', 'failed', 'conflict'].includes(ui.status.kind),
@@ -779,7 +783,8 @@ function updatePicker() {
   const q = m[1].toLowerCase();
   pk.start = editor.selectionStart - m[0].length;
   pk.items = [...notes.index.notes.values()].filter(n => n.path !== ui.path && (!q || n.title.toLowerCase().includes(q) || n.path.includes(q)))
-    .sort((a, b) => (a.title.toLowerCase().startsWith(q) ? 0 : 1) - (b.title.toLowerCase().startsWith(q) ? 0 : 1) || (a.title < b.title ? -1 : 1)).slice(0, 8);
+    .sort((a, b) => (a.title.toLowerCase().startsWith(q) ? 0 : 1) - (b.title.toLowerCase().startsWith(q) ? 0 : 1) || (a.title < b.title ? -1 : 1)).slice(0, 8)
+    .concat(matchRecords(records, q));
   pk.pick = Math.min(pk.pick, Math.max(0, pk.items.length - 1));
   pk.open = true;
   picker.innerHTML = pickerHtml(pk.items, pk.pick);
@@ -789,7 +794,8 @@ function closePicker() { pk.open = false; picker.hidden = true; }
 function choosePicker(k = pk.pick) {
   const n = pk.items[k];
   if (!n) { closePicker(); return; }
-  editor.setRangeText(`[${n.title.replace(/[[\]]/g, '')}](${relativeLink(ui.path, n.path)})`, pk.start, editor.selectionStart, 'end');
+  const md = n.href ? recordLink(n) : `[${n.title.replace(/[[\]]/g, '')}](${relativeLink(ui.path, n.path)})`;
+  editor.setRangeText(md, pk.start, editor.selectionStart, 'end');
   closePicker();
   editor.dispatchEvent(new Event('input'));
 }
@@ -864,6 +870,13 @@ function setQuery(q) {
   ui.query = q; ui.pick = 0;
   paintChrome();
 }
+/* Show a search in the sidebar's box, as if typed. */
+let pendingSearch = null;
+function showSearch(q) {
+  setQuery(q);
+  const box = side.querySelector('[data-search]');
+  if (box) box.value = q;
+}
 side.addEventListener('input', (e) => { if (e.target.matches('[data-search]')) setQuery(e.target.value); });
 side.addEventListener('keydown', (e) => {
   if (!e.target.matches('[data-search]')) return;
@@ -934,6 +947,8 @@ function route(raw) {
   try { path = decodeURIComponent(raw || ''); } catch { path = raw || ''; }
   if (path === 'today') { if (notes.loaded) openToday(); else pendingRoute = 'today'; return; }
   if (path === 'review') { setQuery('is:review'); return; }
+  // search/<words>: Notes opened on a search (Docket's "+N" opens the notes that link to a task).
+  if (path.startsWith('search/')) { const q = path.slice(7); if (notes.loaded) showSearch(q); else pendingSearch = q; return; }
   if (path && /\.md$/.test(path) && path !== ui.path) {
     if (notes.loaded) openNote(path); else pendingRoute = path;
   }
@@ -964,6 +979,13 @@ summary.schedule();
 readSent().then(() => paintChrome());
 if (canSend) ws.data.subscribe('handoffs', () => readSent().then(() => paintChrome()));
 ws.apps.list().then(apps => { for (const a of apps) appNames[a.id] = a.name; paintPreview(true); }).catch(() => {});
+if (pendingSearch !== null) { showSearch(pendingSearch); pendingSearch = null; }
+// Other apps' records for the [[ picker (records.js), where Notes can read their summaries.
+if (canSend) for (const s of SOURCES) {
+  const read = () => ws.data.get('summary', { app: s.app }).then(e => { recordEnvs[s.app] = e; records = recordsFrom(recordEnvs); }, () => {});
+  read();
+  ws.data.subscribe('summary', read, { app: s.app });
+}
 async function openLast() {
   const first = pendingRoute || store('last');
   pendingRoute = null;

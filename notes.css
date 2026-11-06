@@ -213,3 +213,6 @@ dialog:has(.dlg.wide){width:min(860px,calc(100vw - 2rem))}
 .bar.tandem{background:var(--accent-soft, var(--warn-soft));color:var(--ink)}
 .bar.tandem .bar-msg svg{width:14px;height:14px;vertical-align:-2px;color:var(--accent)}
 .md .tandem-new{box-shadow:inset 3px 0 0 var(--accent);background:color-mix(in srgb, var(--accent) 9%, transparent);padding-left:.5rem;border-radius:2px}
+
+/* The [[ picker's divider before other apps' records (records.js) */
+.pick-div{list-style:none;padding:.35rem .6rem .2rem;border-top:1px solid var(--line);font:500 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);pointer-events:none}

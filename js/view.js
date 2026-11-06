@@ -244,7 +244,8 @@ export function linkUpdatesHtml(updates, index) {
 
 export function pickerHtml(items, pick) {
   if (!items.length) return '<p class="soft small pad">No note by that name. Keep typing for a [[link]].</p>';
-  return `<ul role="listbox">${items.map((n, k) => `<li role="option" aria-selected="${k === pick}" data-pick="${k}"><span class="r-title">${esc(n.title)}</span> <span class="soft mono">${esc(n.path)}</span></li>`).join('')}</ul>`;
+  const first = items.findIndex(n => n.href);
+  return `<ul role="listbox">${items.map((n, k) => `${k === first ? '<li class="pick-div" role="presentation">In other apps</li>' : ''}<li role="option" aria-selected="${k === pick}" data-pick="${k}"><span class="r-title">${esc(n.title)}</span> <span class="soft mono">${esc(n.href ? n.name : n.path)}</span></li>`).join('')}</ul>`;
 }
 
 /** New note: the title, and a template when there are any (templates.js). */
