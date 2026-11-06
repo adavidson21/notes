@@ -7,12 +7,32 @@
      show "Notes about this" by matching it. Its title is the note's title; `route` opens the note.
    - `count` (id `review`): product notes Tandem changed since your last review (products.js); `route` is
      `review`, which opens that list.
+   - `targets` (id `folders`, capture `note`): where quick capture can put a note: a `today` row (today's note),
+     then folders with notes in them, most recently used first, up to 199 (Workshop's "n <folder>: ..."). Leaves out
+     templates/, daily/, history/ and attachments/.
    Templates are left out. Pure: no DOM and no SDK. */
 import { appRefs } from './applinks.js';
-import { TEMPLATES } from './templates.js';
+import { DAILY, TEMPLATES } from './templates.js';
 import { toReview } from './products.js';
 
 const RECENT = 10;
+const FOLDERS = 199;
+const NOT_CAPTURE = new Set([TEMPLATES, DAILY, 'history', 'attachments']);
+
+/* [{id, title}]: `today`, then each folder (and parent folder) of a note by its newest note, newest first. */
+function captureFolders(notes) {
+  const used = new Map();
+  for (const n of notes) {
+    const segs = n.path.split('/').slice(0, -1);
+    if (!segs.length || NOT_CAPTURE.has(segs[0])) continue;
+    for (let i = 1; i <= segs.length; i++) {
+      const f = segs.slice(0, i).join('/');
+      used.set(f, Math.max(used.get(f) || 0, n.mtime || 0));
+    }
+  }
+  const folders = [...used].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, FOLDERS).map(([f]) => ({ id: f, title: f }));
+  return [{ id: 'today', title: 'today' }, ...folders];
+}
 const MENTIONS = 20;
 
 /** The cards for an index (model.js buildIndex) and the notes' facts. */
@@ -38,6 +58,7 @@ export function notesCards(index) {
     { id: 'recent', kind: 'list', title: 'Recent notes', count: notes.length,
       rows: byTime.slice(0, RECENT).map(n => ({ id: n.path, title: n.title.slice(0, 200), route: n.path })) },
     { id: 'mentions', kind: 'list', title: 'Notes about other apps', count: seen.size, rows },
+    { id: 'folders', kind: 'targets', title: 'Notes folders', capture: 'note', rows: captureFolders(notes) },
     { id: 'review', kind: 'count', title: 'Product notes to review', count: toReview(index).filter(n => !n.path.startsWith(`${TEMPLATES}/`)).length, route: 'review' }
   ];
 }

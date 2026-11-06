@@ -75,6 +75,8 @@ const pickup = startPickup(ws, notes, {
     ws.toast(day.length === w.length ? (day[0].section ? `Added the ${day[0].section.toLowerCase()} from ${from} to ${where(day[0])}` : `Added ${day.length === 1 ? 'a note' : day.length + ' notes'} from ${from} to ${where(day[0])}`)
       : quick === w.length ? `Added ${quick === 1 ? 'a note' : quick + ' notes'} from ${from} to Quick Notes`
       : w.length === 1 ? `Added a note from ${from}: ${w[0].path}` : `Added ${w.length} notes from ${from}`, { kind: 'success' });
+    const gone = [...new Set(w.filter(x => x.fellBack).map(x => x.fellBack))];
+    if (gone.length) ws.toast(`${gone.map(f => f + '/').join(', ')} ${gone.length === 1 ? "wasn't" : "weren't"} there anymore, so the capture went to ${w.find(x => x.fellBack).path === QUICK ? 'Quick Notes' : 'inbox/'}.`, { kind: 'warn' });
   }
 });
 const toastErr = (e) => ws.toast(e && e.message ? e.message : 'Something went wrong. Try again.', { kind: 'error' });

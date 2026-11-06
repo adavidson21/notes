@@ -6,6 +6,8 @@
      - from Home: a bullet in the one Quick Notes note (`quick-notes.md`, pinned in the sidebar), newest first
        under a heading for its day. A Quick Notes that was trashed or renamed is made again on the next capture.
      - from Dispatch: a new note in `inbox/`.
+     - with payload.folder (quick capture's "n <folder>: ..."), from any sender: a new note in that folder. A
+       folder with no notes by then (renamed or emptied) falls back to the two places above.
      - with payload.daily (a YYYY-MM-DD day), into that day's note, made from the daily template if needed:
          - with payload.section and payload.lines (Docket's wrap-up): a `## <section>` section of bullets,
            replaced by a later offer only while it still says what Notes wrote (daily.js writeSection);
@@ -16,7 +18,7 @@
    id>', path}), never in the sender's. A capture is written once: a note deleted later does not come back.
 
    acceptedNotes, noteFile, quickEntry and addToQuick are pure (apps/notes/test/pickup.test.mjs); startPickup does the reading and writing. */
-import { freePath, newNoteText, slugify } from './model.js';
+import { freePath, newNoteText, slugify, validFolder } from './model.js';
 import { addUnder, writeSection } from './daily.js';
 import { dailyPath, dailyText as starterDaily } from './templates.js';
 
@@ -46,13 +48,14 @@ export function acceptedNotes(app, env, taken = new Set()) {
         const lines = Array.isArray(h.payload.lines) ? h.payload.lines.filter(l => typeof l === 'string' && l.trim()).map(l => l.replace(/\s+/g, ' ').trim().slice(0, 1000)).slice(0, 20) : [];
         if (section && lines.length) { o.section = section; o.lines = lines; }
       }
+      else if (typeof h.payload.folder === 'string' && validFolder(h.payload.folder)) o.folder = h.payload.folder;
       return o;
     });
 }
 
 /* The file for one capture: a free path in inbox/ and its Markdown. paths: Set of every path Notes has. */
 export function noteFile(o, paths) {
-  const path = freePath(paths, INBOX, slugify(o.title, 'captured'), 'md');
+  const path = freePath(paths, o.folder || INBOX, slugify(o.title, 'captured'), 'md');
   const body = o.text === o.title ? '' : o.text + '\n';
   return { path, content: newNoteText(o.title) + body + `\nCaptured in ${o.from} on ${o.date}.\n` };
 }
@@ -118,8 +121,11 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false,
       }
       const byTime = (a, b) => (a.date + a.at + a.id < b.date + b.at + b.id ? -1 : 1);
       const daily = todo.filter(o => o.daily && !hold(dailyPath(o.daily))).sort(byTime);
-      const quick = hold(QUICK) ? [] : todo.filter(o => !o.daily && QUICK_FROM.has(o.app));
-      const files = todo.filter(o => !o.daily && !QUICK_FROM.has(o.app));
+      // A folder capture whose folder is gone goes where a plain capture would (fellBack marks it for the toast).
+      const known = [...(notes.files ? notes.files.keys() : [])];
+      for (const o of todo) if (o.folder && !known.some(p => p.startsWith(`${o.folder}/`))) { o.fellBack = o.folder; delete o.folder; }
+      const quick = hold(QUICK) ? [] : todo.filter(o => !o.daily && !o.folder && QUICK_FROM.has(o.app));
+      const files = todo.filter(o => !o.daily && (o.folder || !QUICK_FROM.has(o.app)));
       if (!quick.length && !files.length && !daily.length) return 0;
       const paths = new Set(notes.files ? notes.files.keys() : []);
       const written = [];
@@ -132,7 +138,7 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false,
           catch (e) { if (e.code !== 'conflict' || tries >= 2) throw e; }
         }
         paths.add(QUICK);
-        written.push(...quick.map(o => ({ id: o.key, path: QUICK })));
+        written.push(...quick.map(o => ({ id: o.key, path: QUICK, ...(o.fellBack ? { fellBack: o.fellBack } : {}) })));
       }
       for (const o of files) {
         const f = noteFile(o, paths);
@@ -145,7 +151,7 @@ export function startPickup(ws, notes, { onAdded = () => {}, hold = () => false,
           f.path = g.path;
         }
         paths.add(f.path);
-        written.push({ id: o.key, path: f.path });
+        written.push({ id: o.key, path: f.path, ...(o.folder ? { folder: o.folder } : {}), ...(o.fellBack ? { fellBack: o.fellBack } : {}) });
       }
       // Into a day's note. last: what Notes last wrote for this note and section (this run's writes count).
       const lastWrite = (path, section) => [...env.items, ...written].reverse().find(i => i.path === path && i.section === section && i.hash) || null;

@@ -98,3 +98,19 @@ test("the day's note waits while it has unsaved edits", async () => {
   assert.equal(await p.run(), 1);
   assert.ok(files.get(`daily/${DAY}.md`).includes('## Wrap-up'), 'made from the starter daily template');
 });
+
+const hEnv = (items) => ({ schema: 'home.handoffs', version: 1, rev: 1, items, deleted: {} });
+const cap = (id, payload, text = 'Rollback needs the flag off') => ({ id, updatedAt: 1, to: 'notes', date: DAY, createdAt: `${DAY}T10:00:00Z`, accepted: true, text, payload: { kind: 'note', title: text, ...payload }, source: { app: 'home', id } });
+
+test('quick capture: n <folder>: makes a note there, n today: goes under ## Notes, a missing folder falls back', async () => {
+  const files = new Map([['runbooks/deploy.md', '# Deploy\n']]), cols = new Map();
+  cols.set('home/handoffs', hEnv([cap('c_1', { folder: 'runbooks' }), cap('c_2', { daily: DAY }, 'Priya asked about the offsite'), cap('c_3', { folder: 'gone' }, 'Lost one'), cap('c_4', { folder: '../x' }, 'Bad')]));
+  const added = [];
+  const notesFake = { files: new Map([['runbooks/deploy.md', { mtime: 1 }]]) };
+  const p = startPickup(fakeWs(cols, files), notesFake, { onAdded: (w) => added.push(...w), dailyText: async (d) => `# ${d}\n\n## Plan\n\n## Notes\n\n## Wins\n` });
+  assert.equal(await p.run(), 4);
+  assert.ok(files.get('runbooks/rollback-needs-the-flag-off.md').startsWith('# Rollback needs the flag off'));
+  assert.equal(files.get(`daily/${DAY}.md`), `# ${DAY}\n\n## Plan\n\n## Notes\n\n- Priya asked about the offsite\n\n## Wins\n`);
+  assert.ok(files.get('quick-notes.md').includes('- Lost one') && files.get('quick-notes.md').includes('- Bad'), 'a gone or invalid folder: Quick Notes, as a plain capture from Home');
+  assert.deepEqual(added.filter(x => x.fellBack).map(x => x.fellBack), ['gone']);
+});
